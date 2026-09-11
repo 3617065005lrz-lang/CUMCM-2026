@@ -6,7 +6,7 @@
 2. 建立144个10分钟时段的确定性线性规划；
 3. 输出逐时段结果、论文表1、论文表2、Baseline对比和约束校验；
 4. 输出result1_第一版.xlsx；
-5. 保存绘图缓存，并且只生成两张中文图片。
+5. 保存绘图缓存，并生成四张中文结果图片。
 
 环境：Python 3.11+
 依赖：pandas、numpy、scipy、matplotlib、openpyxl
@@ -19,7 +19,7 @@
 模式：
     all    求解、输出表格并绘图
     solve  只求解并输出表格和绘图缓存
-    plot   只读取绘图缓存重新生成两张图片
+    plot   只读取绘图缓存重新生成四张图片
 """
 
 from __future__ import annotations
@@ -593,8 +593,20 @@ def configure_chinese_plot_style() -> None:
 
 
 def _set_time_axis(axis: plt.Axes) -> None:
+    major_hours = np.arange(0, 25, 2)
     axis.set_xlim(0, 24)
-    axis.set_xticks(np.arange(0, 25, 2))
+    axis.set_xticks(major_hours)
+    axis.set_xticklabels([f"{hour}:00" for hour in major_hours])
+    axis.set_xlabel("时刻")
+
+
+def _set_interval_index_axis(axis: plt.Axes) -> None:
+    """横坐标内部使用1至144连续编号，刻度文字仍显示对应时刻。"""
+    tick_positions = np.arange(0.5, EXPECTED_INTERVALS + 1.0, 12.0)
+    tick_labels = [f"{hour}:00" for hour in range(0, 25, 2)]
+    axis.set_xlim(0.5, EXPECTED_INTERVALS + 0.5)
+    axis.set_xticks(tick_positions)
+    axis.set_xticklabels(tick_labels)
     axis.set_xlabel("时刻")
 
 
@@ -603,11 +615,10 @@ def draw_storage_step(
     storage_x: np.ndarray,
     storage_y: np.ndarray,
 ) -> plt.Line2D:
-    """按离散时段绘制储电量：每10分钟内保持水平，在区间终点跳变。"""
-    return axis.step(
+    """按1至144连续时段编号绘制储电量折线。"""
+    return axis.plot(
         storage_x,
         storage_y,
-        where="post",
         color="#1F3A93",
         linewidth=2.0,
         label="储电量",
@@ -616,16 +627,18 @@ def draw_storage_step(
 
 
 def _interval_step_data(result: pd.DataFrame, column: str) -> tuple[np.ndarray, np.ndarray]:
-    """把每10分钟区间值扩展到24:00，供右端跳变阶梯图使用。"""
-    x = np.r_[result["区间开始分钟"].to_numpy(dtype=float) / 60.0, 24.0]
+    """按预处理后的顺序生成1至144连续时段横坐标。"""
+    x = np.arange(1, len(result) + 1, dtype=float)
     values = result[column].to_numpy(dtype=float)
-    y = np.r_[values, values[-1]]
-    return x, y
+    return x, values
 
 
-def _style_time_series_axis(axis: plt.Axes) -> None:
+def _style_time_series_axis(axis: plt.Axes, use_interval_index: bool = False) -> None:
     """统一日内时序图的坐标轴与网格样式。"""
-    _set_time_axis(axis)
+    if use_interval_index:
+        _set_interval_index_axis(axis)
+    else:
+        _set_time_axis(axis)
     axis.set_ylim(bottom=0)
     axis.set_axisbelow(True)
     axis.grid(axis="y", color="#A7ADB5", linestyle="--", linewidth=0.5, alpha=0.45)
@@ -641,8 +654,8 @@ def _annotate_maximum(
     unit: str,
 ) -> None:
     """仅标注长时间序列的最高点，避免给全部数据点加标记。"""
-    source_x = np.asarray(x[:-1], dtype=float)
-    source_y = np.asarray(y[:-1], dtype=float)
+    source_x = np.asarray(x, dtype=float)
+    source_y = np.asarray(y, dtype=float)
     if source_y.size == 0 or not np.isfinite(source_y).any():
         return
     index = int(np.nanargmax(source_y))
@@ -650,12 +663,43 @@ def _annotate_maximum(
     if maximum <= 0:
         return
     point_x = float(source_x[index])
-    horizontal_offset = -105 if point_x >= 20 else 10
+    horizontal_offset = -105 if point_x >= axis.get_xlim()[1] * 0.8 else 10
     axis.scatter([point_x], [maximum], s=28, color=color, edgecolor="white", linewidth=0.8, zorder=7)
     axis.annotate(
         f"最高值：{maximum:.2f} {unit}",
         xy=(point_x, maximum),
         xytext=(horizontal_offset, -30),
+        textcoords="offset points",
+        fontsize=9,
+        color=color,
+        bbox={"boxstyle": "round,pad=0.3", "facecolor": "white", "edgecolor": color, "alpha": 0.92},
+        arrowprops={"arrowstyle": "->", "color": color, "linewidth": 0.8},
+        zorder=8,
+    )
+
+
+def _annotate_discharge_maximum(
+    axis: plt.Axes,
+    x: np.ndarray,
+    signed_discharge: np.ndarray,
+    color: str,
+) -> None:
+    """在负半轴标注绝对值最大的放电量。"""
+    source_x = np.asarray(x, dtype=float)
+    source_y = np.asarray(signed_discharge, dtype=float)
+    if source_y.size == 0 or not np.isfinite(source_y).any():
+        return
+    index = int(np.nanargmin(source_y))
+    minimum = float(source_y[index])
+    if minimum >= 0:
+        return
+    point_x = float(source_x[index])
+    horizontal_offset = -125 if point_x >= axis.get_xlim()[1] * 0.8 else 10
+    axis.scatter([point_x], [minimum], s=28, color=color, edgecolor="white", linewidth=0.8, zorder=7)
+    axis.annotate(
+        f"最大放电量：{-minimum:.2f} kWh",
+        xy=(point_x, minimum),
+        xytext=(horizontal_offset, 24),
         textcoords="offset points",
         fontsize=9,
         color=color,
@@ -678,20 +722,18 @@ def save_price_purchase_figure(result: pd.DataFrame, image_dir: Path, dpi: int) 
     figure, price_axis = plt.subplots(figsize=(14, 6.5))
     purchase_axis = price_axis.twinx()
 
-    price_line = price_axis.step(
+    price_line = price_axis.plot(
         time_x,
         price_y,
-        where="post",
         color="#D95F02",
         linestyle="-",
         linewidth=2.0,
         label="电价",
         zorder=4,
     )[0]
-    purchase_line = purchase_axis.step(
+    purchase_line = purchase_axis.plot(
         time_x,
         purchase_y,
-        where="post",
         color="#1F3A93",
         linestyle="-",
         linewidth=2.0,
@@ -704,7 +746,7 @@ def save_price_purchase_figure(result: pd.DataFrame, image_dir: Path, dpi: int) 
     purchase_axis.set_ylabel("每10分钟购电量（kWh）", color="#1F3A93")
     price_axis.tick_params(axis="y", labelcolor="#D95F02")
     purchase_axis.tick_params(axis="y", labelcolor="#1F3A93")
-    _style_time_series_axis(price_axis)
+    _style_time_series_axis(price_axis, use_interval_index=True)
     purchase_axis.set_ylim(bottom=0)
     purchase_axis.spines["top"].set_visible(False)
 
@@ -730,18 +772,28 @@ def save_storage_discharge_figure(
     config: ModelConfig,
     dpi: int,
 ) -> None:
-    flow_x, discharge_y = _interval_step_data(result, "放电量（kWh）")
-    storage_x = np.r_[0.0, result["区间终点分钟"].to_numpy(dtype=float) / 60.0]
-    storage_y = np.r_[result.iloc[0]["时段开始储电量（kWh）"], result["时段结束储电量（kWh）"].to_numpy()]
+    flow_x, charge_y = _interval_step_data(result, "充电量（kWh）")
+    _, discharge_y = _interval_step_data(result, "放电量（kWh）")
+    signed_discharge_y = -discharge_y
+    storage_x = np.arange(1, len(result) + 1, dtype=float)
+    storage_y = result["时段结束储电量（kWh）"].to_numpy(dtype=float)
 
     figure, storage_axis = plt.subplots(figsize=(14, 6.5))
     discharge_axis = storage_axis.twinx()
 
     storage_line = draw_storage_step(storage_axis, storage_x, storage_y)
-    discharge_line = discharge_axis.step(
+    charge_line = discharge_axis.plot(
         flow_x,
-        discharge_y,
-        where="post",
+        charge_y,
+        color="#1B9E77",
+        linestyle="-",
+        linewidth=2.0,
+        label="充电量",
+        zorder=3,
+    )[0]
+    discharge_line = discharge_axis.plot(
+        flow_x,
+        signed_discharge_y,
         color="#D95F02",
         linestyle="-",
         linewidth=2.0,
@@ -777,25 +829,36 @@ def save_storage_discharge_figure(
         label="额定容量",
     )
 
-    storage_axis.set_title("储电量与放电量的日内变化")
+    storage_axis.set_title("储电量与充放电量的日内变化")
     storage_axis.set_ylabel("储电量（kWh）", color="#1F3A93")
-    discharge_axis.set_ylabel("每10分钟放电量（kWh）", color="#D95F02")
+    discharge_axis.set_ylabel("每10分钟充放电量（kWh）")
     storage_axis.tick_params(axis="y", labelcolor="#1F3A93")
-    discharge_axis.tick_params(axis="y", labelcolor="#D95F02")
-    _style_time_series_axis(storage_axis)
+    discharge_axis.tick_params(axis="y", labelcolor="#52657A")
+    _style_time_series_axis(storage_axis, use_interval_index=True)
     storage_axis.set_ylim(0, 12000.0)
     storage_axis.set_yticks(np.arange(0, 12001, 2000))
-    discharge_axis.set_ylim(bottom=0)
+    flow_limit = max(float(np.nanmax(charge_y)), float(np.nanmax(discharge_y)), 1.0) * 1.15
+    discharge_axis.set_ylim(-flow_limit, flow_limit)
+    discharge_axis.axhline(0, color="#A7ADB5", linewidth=0.5, zorder=1)
     discharge_axis.spines["top"].set_visible(False)
 
     _annotate_maximum(storage_axis, storage_x, storage_y, "#1F3A93", "kWh")
-    _annotate_maximum(discharge_axis, flow_x, discharge_y, "#D95F02", "kWh")
-    handles = [storage_line, discharge_line, rated_lower_line, rated_upper_line, initial_line, nominal_capacity_line]
+    _annotate_maximum(discharge_axis, flow_x, charge_y, "#1B9E77", "kWh")
+    _annotate_discharge_maximum(discharge_axis, flow_x, signed_discharge_y, "#D95F02")
+    handles = [
+        storage_line,
+        charge_line,
+        discharge_line,
+        rated_lower_line,
+        rated_upper_line,
+        initial_line,
+        nominal_capacity_line,
+    ]
     labels = [handle.get_label() for handle in handles]
-    storage_axis.legend(handles, labels, loc="upper center", bbox_to_anchor=(0.5, -0.12), ncol=3)
+    storage_axis.legend(handles, labels, loc="upper center", bbox_to_anchor=(0.5, -0.12), ncol=4)
     _finish_figure(
         figure,
-        image_dir / versioned_name("图2_储电量与放电量", ".png"),
+        image_dir / versioned_name("图2_储电量与充放电量", ".png"),
         dpi,
     )
 
@@ -805,19 +868,17 @@ def save_photovoltaic_load_figure(result: pd.DataFrame, image_dir: Path, dpi: in
     _, photovoltaic = _interval_step_data(result, "光伏发电量（kWh）")
 
     figure, axis = plt.subplots(figsize=(14, 6.5))
-    load_line = axis.step(
+    load_line = axis.plot(
         x,
         load,
-        where="post",
         color="#1F3A93",
         linestyle="-",
         linewidth=2.0,
         label="小区耗电量",
     )[0]
-    photovoltaic_line = axis.step(
+    photovoltaic_line = axis.plot(
         x,
         photovoltaic,
-        where="post",
         color="#D95F02",
         linestyle="-",
         linewidth=2.0,
@@ -825,7 +886,7 @@ def save_photovoltaic_load_figure(result: pd.DataFrame, image_dir: Path, dpi: in
     )[0]
     axis.set_title("光伏发电量与小区耗电量的日内变化")
     axis.set_ylabel("每10分钟电量（kWh）")
-    _style_time_series_axis(axis)
+    _style_time_series_axis(axis, use_interval_index=True)
     _annotate_maximum(axis, x, load, "#1F3A93", "kWh")
     _annotate_maximum(axis, x, photovoltaic, "#D95F02", "kWh")
     axis.legend(
@@ -842,6 +903,73 @@ def save_photovoltaic_load_figure(result: pd.DataFrame, image_dir: Path, dpi: in
     )
 
 
+def build_cumulative_cost_series(result: pd.DataFrame) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """计算无储能基准方案与线性规划方案的累计购电费用。"""
+    x = np.arange(len(result) + 1, dtype=float) * TIME_STEP_MINUTES / 60.0
+    price = result["电价（元/kWh）"].to_numpy(dtype=float)
+    load = result["小区耗电量（kWh）"].to_numpy(dtype=float)
+    photovoltaic = result["光伏发电量（kWh）"].to_numpy(dtype=float)
+    purchase = result["计划购电量（kWh）"].to_numpy(dtype=float)
+    baseline_interval_cost = price * np.maximum(load - photovoltaic, 0.0)
+    optimized_interval_cost = price * purchase
+    baseline_cumulative = np.r_[0.0, np.cumsum(baseline_interval_cost)]
+    optimized_cumulative = np.r_[0.0, np.cumsum(optimized_interval_cost)]
+    return x, baseline_cumulative, optimized_cumulative
+
+
+def save_cumulative_cost_figure(result: pd.DataFrame, image_dir: Path, dpi: int) -> None:
+    x, baseline_cost, optimized_cost = build_cumulative_cost_series(result)
+    figure, axis = plt.subplots(figsize=(14, 6.5))
+
+    baseline_line = axis.plot(
+        x,
+        baseline_cost,
+        color="#D95F02",
+        linestyle="-",
+        linewidth=2.0,
+        label="无储能调度",
+    )[0]
+    optimized_line = axis.plot(
+        x,
+        optimized_cost,
+        color="#1F3A93",
+        linestyle="-",
+        linewidth=2.0,
+        label="线性规划优化后",
+    )[0]
+
+    axis.set_title("优化前后累计购电费用对比")
+    axis.set_ylabel("累计购电费用（元）")
+    _style_time_series_axis(axis)
+    axis.scatter([x[-1]], [baseline_cost[-1]], s=30, color="#D95F02", edgecolor="white", linewidth=0.8, zorder=5)
+    axis.scatter([x[-1]], [optimized_cost[-1]], s=30, color="#1F3A93", edgecolor="white", linewidth=0.8, zorder=5)
+
+    saving = float(baseline_cost[-1] - optimized_cost[-1])
+    saving_rate = saving / float(baseline_cost[-1]) if baseline_cost[-1] else 0.0
+    axis.annotate(
+        f"全天节省：{saving:.2f} 元（{saving_rate:.2%}）",
+        xy=(x[-1], optimized_cost[-1]),
+        xytext=(-190, -42 if saving >= 0 else 28),
+        textcoords="offset points",
+        fontsize=9,
+        color="#1F3A93",
+        bbox={"boxstyle": "round,pad=0.35", "facecolor": "white", "edgecolor": "#1F3A93", "alpha": 0.92},
+        arrowprops={"arrowstyle": "->", "color": "#1F3A93", "linewidth": 0.8},
+    )
+    axis.legend(
+        [baseline_line, optimized_line],
+        ["无储能调度", "线性规划优化后"],
+        loc="upper center",
+        bbox_to_anchor=(0.5, -0.12),
+        ncol=2,
+    )
+    _finish_figure(
+        figure,
+        image_dir / versioned_name("图4_优化前后累计购电费用", ".png"),
+        dpi,
+    )
+
+
 def save_plot_cache(result: pd.DataFrame, cache_dir: Path) -> Path:
     columns = [
         "时间段编号",
@@ -852,6 +980,7 @@ def save_plot_cache(result: pd.DataFrame, cache_dir: Path) -> Path:
         "时段开始储电量（kWh）",
         "时段结束储电量（kWh）",
         "计划购电量（kWh）",
+        "充电量（kWh）",
         "放电量（kWh）",
         "光伏发电量（kWh）",
         "小区耗电量（kWh）",
@@ -875,6 +1004,7 @@ def run_plot_stage(result: pd.DataFrame, output_dir: Path, config: ModelConfig, 
     obsolete_names = [
         versioned_name("图1_储电量计划购电量与放电量", ".png"),
         versioned_name("图2_光伏发电量与小区耗电量", ".png"),
+        versioned_name("图2_储电量与放电量", ".png"),
     ]
     for obsolete_name in obsolete_names:
         obsolete_path = image_dir / obsolete_name
@@ -884,6 +1014,7 @@ def run_plot_stage(result: pd.DataFrame, output_dir: Path, config: ModelConfig, 
     save_price_purchase_figure(result, image_dir, dpi)
     save_storage_discharge_figure(result, image_dir, config, dpi)
     save_photovoltaic_load_figure(result, image_dir, dpi)
+    save_cumulative_cost_figure(result, image_dir, dpi)
 
 
 def run_solve_stage(
